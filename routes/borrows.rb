@@ -1,137 +1,76 @@
 module BorrowsRoutes
   def self.registered(app)
+    app.helpers do
+      def json_list(data)
+        { borrows: data.map(&:to_h), count: data.length }.to_json
+      end
+
+      def handle_borrow_errors
+        yield
+      rescue Borrow::ValidationError => e
+        halt 400, { error: e.message }.to_json
+      rescue Borrow::NotFoundError => e
+        halt 404, { error: e.message }.to_json
+      rescue Borrow::ForbiddenError => e
+        halt 403, { error: e.message }.to_json
+      end
+    end
+
     app.get '/api/borrows/overdue' do
       authorize_admin!
-      borrows = Borrow.where(status: 'borrowed')
-                      .where(Sequel.lit('expected_return_date IS NOT NULL AND expected_return_date < ?', Date.today))
-                      .order(Sequel.asc(:expected_return_date))
-                      .all
-      result = borrows.map do |b|
-        h = b.to_h
-        h[:overdue] = true
-        h[:overdue_days] = b.overdue_days
-        h
-      end
-      { borrows: result, count: result.length }.to_json
+      json_list Borrow.overdue.all
     end
 
     app.get '/api/borrows/current' do
       authenticate!
-      borrows = Borrow.where(status: 'borrowed')
-                      .order(:borrowed_at)
-                      .all
-                      .map(&:to_h)
-      { borrows: borrows, count: borrows.length }.to_json
+      json_list Borrow.current_borrowed.all
     end
 
     app.get '/api/borrows/my' do
       authenticate!
-      borrows = Borrow.where(user_id: current_user.id)
-                      .order(Sequel.desc(:borrowed_at))
-                      .all
-                      .map(&:to_h)
-      { borrows: borrows, count: borrows.length }.to_json
+      json_list Borrow.by_user(current_user.id).all
     end
 
     app.get '/api/borrows' do
       authorize_admin!
-      dataset = Borrow.dataset
-
-      if params['status']
-        dataset = dataset.where(status: params['status'])
-      end
-
-      if params['user_id']
-        dataset = dataset.where(user_id: params['user_id'])
-      end
-
-      if params['device_id']
-        dataset = dataset.where(device_id: params['device_id'])
-      end
-
-      borrows = dataset.order(Sequel.desc(:borrowed_at)).all.map(&:to_h)
-      { borrows: borrows, count: borrows.length }.to_json
+      json_list Borrow.filtered(params).all
     end
 
     app.get '/api/borrows/:id' do
       authenticate!
-      borrow = Borrow[params['id']]
-      halt 404, { error: '借用记录不存在' }.to_json unless borrow
-
-      if !current_user.admin? && borrow.user_id != current_user.id
-        halt 403, { error: '无权查看此记录' }.to_json
+      handle_borrow_errors do
+        borrow = Borrow[params['id']]
+        raise Borrow::NotFoundError, '借用记录不存在' unless borrow
+        borrow.ensure_viewable_by!(current_user)
+        { borrow: borrow.to_h }.to_json
       end
-
-      { borrow: borrow.to_h }.to_json
     end
 
     app.post '/api/borrows' do
       authenticate!
-      params = json_params
-
-      if params['device_id'].to_s.empty?
-        halt 400, { error: '请选择要借用的设备' }.to_json
-      end
-
-      if params['expected_return_date'].to_s.empty?
-        halt 400, { error: '请填写预计归还日期' }.to_json
-      end
-
-      begin
-        expected_date = Date.parse(params['expected_return_date'])
-      rescue ArgumentError
-        halt 400, { error: '预计归还日期格式无效，请使用YYYY-MM-DD格式' }.to_json
-      end
-
-      if expected_date <= Date.today
-        halt 400, { error: '预计归还日期必须晚于今天' }.to_json
-      end
-
-      device = Device[params['device_id']]
-      halt 404, { error: '设备不存在' }.to_json unless device
-
-      if device.borrowed?
-        halt 400, { error: '设备已被借出，请选择其他设备' }.to_json
-      end
-
-      borrow = Borrow.new(
-        user_id: current_user.id,
-        device_id: device.id,
-        borrowed_at: DateTime.now,
-        expected_return_date: expected_date,
-        purpose: params['purpose'],
-        status: 'borrowed'
-      )
-
-      DB.transaction do
-        if borrow.save
-          device.mark_as_borrowed
-          status 201
-          { message: '借用申请成功', borrow: borrow.to_h }.to_json
-        else
-          halt 400, { error: '借用申请失败', details: borrow.errors }.to_json
-        end
+      handle_borrow_errors do
+        p = json_params
+        borrow = Borrow.create_borrow(
+          user: current_user,
+          device_id: p['device_id'],
+          expected_return_date_str: p['expected_return_date'],
+          purpose: p['purpose']
+        )
+        status 201
+        { message: '借用申请成功', borrow: borrow.to_h }.to_json
       end
     end
 
     app.post '/api/borrows/:id/return' do
       authenticate!
-      borrow = Borrow[params['id']]
-      halt 404, { error: '借用记录不存在' }.to_json unless borrow
-
-      if borrow.status != 'borrowed'
-        halt 400, { error: '该设备已归还' }.to_json
-      end
-
-      if !current_user.admin? && borrow.user_id != current_user.id
-        halt 403, { error: '无权归还此设备' }.to_json
-      end
-
-      DB.transaction do
-        borrow.return!
+      handle_borrow_errors do
+        borrow = Borrow[params['id']]
+        raise Borrow::NotFoundError, '借用记录不存在' unless borrow
+        borrow.ensure_returnable_by!(current_user)
+        days = borrow.process_return!
         {
           message: '设备归还成功',
-          borrow_days: borrow.borrow_days,
+          borrow_days: days,
           borrow: borrow.to_h
         }.to_json
       end
@@ -139,15 +78,12 @@ module BorrowsRoutes
 
     app.delete '/api/borrows/:id' do
       authorize_admin!
-      borrow = Borrow[params['id']]
-      halt 404, { error: '借用记录不存在' }.to_json unless borrow
-
-      if borrow.status == 'borrowed'
-        borrow.device.mark_as_available
+      handle_borrow_errors do
+        borrow = Borrow[params['id']]
+        raise Borrow::NotFoundError, '借用记录不存在' unless borrow
+        borrow.destroy_safely!
+        { message: '借用记录删除成功' }.to_json
       end
-
-      borrow.delete
-      { message: '借用记录删除成功' }.to_json
     end
   end
 end
