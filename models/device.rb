@@ -12,11 +12,13 @@ class Device < Sequel::Model
   end
 
   def mark_as_borrowed
-    update(status: 'borrowed')
+    this.update(status: 'borrowed')
+    reload
   end
 
   def mark_as_available
-    update(status: 'available')
+    this.update(status: 'available')
+    reload
   end
 
   def current_borrow
