@@ -49,6 +49,36 @@ devices_data.each do |data|
   Device.create(data.merge(status: 'available'))
 end
 
+puts 'Creating borrow records for testing...'
+device1 = Device.first(serial_number: 'NB-2024-001')
+device2 = Device.first(serial_number: 'CAM-2024-001')
+zhangsan = User.first(username: 'zhangsan')
+lisi = User.first(username: 'lisi')
+
+overdue_borrow = Borrow.new(
+  user_id: zhangsan.id,
+  device_id: device1.id,
+  borrowed_at: DateTime.now - 35,
+  expected_return_date: Date.today - 5,
+  purpose: '项目开发使用',
+  status: 'borrowed'
+)
+overdue_borrow.save
+device1.update(status: 'borrowed')
+
+normal_borrow = Borrow.new(
+  user_id: lisi.id,
+  device_id: device2.id,
+  borrowed_at: DateTime.now - 3,
+  expected_return_date: Date.today + 7,
+  purpose: '拍摄公司宣传片',
+  status: 'borrowed'
+)
+normal_borrow.save
+device2.update(status: 'borrowed')
+
 puts 'Seed data created successfully!'
 puts "Admin: admin / admin123"
 puts "Employees: zhangsan / 123456, lisi / 123456"
+puts "Overdue borrow: zhangsan borrowed ThinkPad X1 Carbon (5 days overdue)"
+puts "Normal borrow: lisi borrowed Canon EOS R6 (due in 7 days)"

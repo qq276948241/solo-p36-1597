@@ -1,5 +1,20 @@
 module BorrowsRoutes
   def self.registered(app)
+    app.get '/api/borrows/overdue' do
+      authorize_admin!
+      borrows = Borrow.where(status: 'borrowed')
+                      .where(Sequel.lit('expected_return_date IS NOT NULL AND expected_return_date < ?', Date.today))
+                      .order(Sequel.asc(:expected_return_date))
+                      .all
+      result = borrows.map do |b|
+        h = b.to_h
+        h[:overdue] = true
+        h[:overdue_days] = b.overdue_days
+        h
+      end
+      { borrows: result, count: result.length }.to_json
+    end
+
     app.get '/api/borrows/current' do
       authenticate!
       borrows = Borrow.where(status: 'borrowed')
@@ -58,6 +73,20 @@ module BorrowsRoutes
         halt 400, { error: '请选择要借用的设备' }.to_json
       end
 
+      if params['expected_return_date'].to_s.empty?
+        halt 400, { error: '请填写预计归还日期' }.to_json
+      end
+
+      begin
+        expected_date = Date.parse(params['expected_return_date'])
+      rescue ArgumentError
+        halt 400, { error: '预计归还日期格式无效，请使用YYYY-MM-DD格式' }.to_json
+      end
+
+      if expected_date <= Date.today
+        halt 400, { error: '预计归还日期必须晚于今天' }.to_json
+      end
+
       device = Device[params['device_id']]
       halt 404, { error: '设备不存在' }.to_json unless device
 
@@ -69,6 +98,7 @@ module BorrowsRoutes
         user_id: current_user.id,
         device_id: device.id,
         borrowed_at: DateTime.now,
+        expected_return_date: expected_date,
         purpose: params['purpose'],
         status: 'borrowed'
       )

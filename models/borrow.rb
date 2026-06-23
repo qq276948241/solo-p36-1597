@@ -4,6 +4,15 @@ class Borrow < Sequel::Model
   many_to_one :user
   many_to_one :device
 
+  def overdue?
+    status == 'borrowed' && expected_return_date && Date.today > expected_return_date
+  end
+
+  def overdue_days
+    return 0 unless overdue?
+    (Date.today - expected_return_date).to_i
+  end
+
   def return!
     returned_at = DateTime.now
     diff_seconds = (returned_at.to_time - borrowed_at.to_time).to_i
@@ -18,7 +27,7 @@ class Borrow < Sequel::Model
   end
 
   def to_h
-    {
+    h = {
       id: id,
       user_id: user_id,
       user_name: user&.name,
@@ -26,6 +35,7 @@ class Borrow < Sequel::Model
       device_name: device&.name,
       device_type: device&.equipment_type,
       borrowed_at: borrowed_at,
+      expected_return_date: expected_return_date,
       returned_at: returned_at,
       borrow_days: borrow_days,
       purpose: purpose,
@@ -33,5 +43,10 @@ class Borrow < Sequel::Model
       created_at: created_at,
       updated_at: updated_at
     }
+    if overdue?
+      h[:overdue] = true
+      h[:overdue_days] = overdue_days
+    end
+    h
   end
 end
